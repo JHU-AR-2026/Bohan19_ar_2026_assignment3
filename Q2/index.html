@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q2</title>
+<style>
+body { margin: 0; font: 14px Arial; }
+#canvas { width: 100%; height: 100vh; display: block; }
+#panel { position: absolute; top: 16px; left: 16px; padding: 16px; background: white; line-height: 1.6; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs@8.32.0/babylon.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/babylonjs-loaders@8.32.0/babylonjs.loaders.min.js"></script>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="panel">
+Right trigger → Spawn at hit location<br>
+Right thumbstick → Move horizontally<br>
+Left thumbstick left/right → Rotate<br>
+A / B → Scale up / down<br>
+X → Reset to initial state<br>
+<button id="enterAR" disabled>Enter AR</button>
+</div>
+<script>
+const engine = new BABYLON.Engine(document.getElementById("canvas"), true);
+const scene = new BABYLON.Scene(engine);
+scene.useRightHandedSystem = true;
+scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+const camera = new BABYLON.FreeCamera("camera", new BABYLON.Vector3(0, 1.6, 0), scene);
+camera.minZ = 0.05;
+new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+const arButton = document.getElementById("enterAR");
+const controllers = { left: null, right: null };
+const ray = new BABYLON.Ray(BABYLON.Vector3.Zero(), new BABYLON.Vector3(0, 0, -1), 5);
+const rayHelper = new BABYLON.RayHelper(ray);
+let xr, chairTemplate, latestModel, initialState, hitTestSource, hitPosition;
+function pressed(motion, id) {
+    if (!motion) return false;
+    const button = motion.getComponent(id);
+    return button && button.changes.pressed && button.pressed;
+}
+function spawnChair() {
+    if (!hitPosition) return;
+    latestModel = chairTemplate.clone("chair");
+    latestModel.setEnabled(true);
+    latestModel.position.copyFrom(hitPosition);
+    initialState = {
+        position: latestModel.position.clone(),
+        rotation: latestModel.rotation.clone(),
+        scaling: latestModel.scaling.clone()
+    };
+}
+function updateHit(frame) {
+    hitPosition = null;
+    if (!hitTestSource) return;
+    const hits = frame.getHitTestResults(hitTestSource);
+    if (hits.length === 0) return;
+    const pose = hits[0].getPose(xr.baseExperience.sessionManager.referenceSpace);
+    if (!pose) return;
+    const position = pose.transform.position;
+    hitPosition = new BABYLON.Vector3(position.x, position.y, position.z);
+}
+async function setupXR() {
+    xr = await scene.createDefaultXRExperienceAsync({
+        disableDefaultUI: true, disablePointerSelection: true, disableTeleportation: true,
+        disableNearInteraction: true, disableHandTracking: true, ignoreNativeCameraTransformation: true
+    });
+    xr.input.onControllerAddedObservable.add(async function (controller) {
+        const hand = controller.inputSource.handedness;
+        if (!controller.inputSource.gamepad || (hand !== "left" && hand !== "right")) return;
+        controllers[hand] = controller;
+        if (hand !== "right") return;
+        const session = xr.baseExperience.sessionManager.session;
+        const source = await session.requestHitTestSource({ space: controller.inputSource.targetRaySpace });
+        if (controllers.right === controller) hitTestSource = source;
+        else if (xr.baseExperience.state === BABYLON.WebXRState.IN_XR) source.cancel();
+    });
+    xr.input.onControllerRemovedObservable.add(function (controller) {
+        const hand = controller.inputSource.handedness;
+        if (controllers[hand] !== controller) return;
+        controllers[hand] = null;
+        if (hand === "right") {
+            if (hitTestSource && xr.baseExperience.state === BABYLON.WebXRState.IN_XR) hitTestSource.cancel();
+            hitTestSource = null;
+            rayHelper.hide();
+        }
+    });
+    xr.baseExperience.onStateChangedObservable.add(function (state) {
+        arButton.textContent = state === BABYLON.WebXRState.IN_XR ? "Exit AR" : "Enter AR";
+    });
+    scene.onBeforeRenderObservable.add(function () {
+        if (xr.baseExperience.state !== BABYLON.WebXRState.IN_XR) return;
+        updateHit(xr.baseExperience.sessionManager.currentFrame);
+        const right = controllers.right && controllers.right.motionController;
+        const left = controllers.left && controllers.left.motionController;
+        if (controllers.right) {
+            controllers.right.getWorldPointerRayToRef(ray);
+            ray.length = hitPosition ? BABYLON.Vector3.Distance(ray.origin, hitPosition) : 5;
+            rayHelper.show(scene, BABYLON.Color3.Green());
+        }
+        if (pressed(right, "xr-standard-trigger")) spawnChair();
+        if (!latestModel) return;
+        const seconds = engine.getDeltaTime() / 1000;
+        const move = right && right.getComponentOfType("thumbstick");
+        const turn = left && left.getComponentOfType("thumbstick");
+        if (move) {
+            latestModel.position.x += move.axes.x * 0.8 * seconds;
+            latestModel.position.z += move.axes.y * 0.8 * seconds;
+        }
+        if (turn) latestModel.rotation.y += turn.axes.x * 1.5 * seconds;
+        if (pressed(right, "a-button")) latestModel.scaling.scaleInPlace(1.1);
+        if (pressed(right, "b-button")) latestModel.scaling.scaleInPlace(1 / 1.1);
+        if (pressed(left, "x-button")) {
+            latestModel.position.copyFrom(initialState.position);
+            latestModel.rotation.copyFrom(initialState.rotation);
+            latestModel.scaling.copyFrom(initialState.scaling);
+        }
+    });
+}
+async function main() {
+    const model = await BABYLON.SceneLoader.ImportMeshAsync("", "assets/", "chair.glb", scene);
+    chairTemplate = new BABYLON.TransformNode("template", scene);
+    const chair = model.meshes[0];
+    chair.parent = chairTemplate;
+    chair.scaling.setAll(0.45);
+    chair.position.set(0, 0.0015, 0.0143);
+    chairTemplate.setEnabled(false);
+    arButton.disabled = false;
+    arButton.onclick = async function () {
+        arButton.disabled = true;
+        try {
+            if (!xr) await setupXR();
+            if (xr.baseExperience.state === BABYLON.WebXRState.IN_XR) {
+                await xr.baseExperience.exitXRAsync();
+            } else {
+                await xr.baseExperience.enterXRAsync("immersive-ar", "local-floor", xr.renderTarget, { requiredFeatures: ["hit-test"] });
+            }
+        } catch (error) { console.error(error); }
+        arButton.disabled = false;
+    };
+}
+engine.runRenderLoop(function () { scene.render(); });
+window.addEventListener("resize", function () { engine.resize(); });
+main();
+</script>
+</body>
+</html>
