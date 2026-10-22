@@ -1,3 +1,5 @@
+## Assignment 3 - Introduction to Augmented Reality
+## Author: Bohan Hou
 ## Q2: WebXR
 
 ```bash
